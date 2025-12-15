@@ -1,151 +1,224 @@
+import numpy as np
+import matplotlib.pyplot as plt
 import streamlit as st
-import pandas as pd
-import math
-from pathlib import Path
+from matplotlib.patches import Circle
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+from simpeg.potential_fields.gravity import analytics
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
-
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
+def compute_gz_mgal(
+    rho_background: float,
+    rho_sphere: float,
+    radius_m: float,
+    depth_center_m: float,
+    x_max_km: float,
+    n_obs: int,
+) -> tuple[np.ndarray, np.ndarray]:
     """
+    Returns (x_km, gz_mgal) along a profile at surface (z=0) for a buried sphere.
+    Convention: positive anomaly for positive density contrast (geophysical convention).
+    """
+    # Density contrast (kg/m^3 -> g/cc)
+    delta_rho_kgm3 = rho_sphere - rho_background
+    delta_rho_gcc = delta_rho_kgm3 / 1000.0
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+    # Profile (meters)
+    x_m = np.linspace(-x_max_km * 1000.0, x_max_km * 1000.0, int(n_obs))
+    y_m = np.zeros_like(x_m)
+    z_m = np.zeros_like(x_m)
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+    # Sphere center (meters). In SimPEG convention, depth is negative z
+    xc, yc, zc = 0.0, 0.0, -abs(depth_center_m)
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
+    # Your SimPEG build returns a tuple: (gx, gy, gz)
+    gx, gy, gz = analytics.GravSphereFreeSpace(
+        x_m, y_m, z_m, radius_m, xc, yc, zc, delta_rho_gcc
     )
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+    # IMPORTANT:
+    # In your earlier run, gz was already in mGal-scale (multiplying by 1e5 was too big).
+    # We also flip sign so dense body gives positive anomaly (geophysical convention).
+    gz_mgal = -gz
 
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
+    return x_m / 1000.0, gz_mgal
 
 
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
+def make_figure(
+    x_km: np.ndarray,
+    gz_mgal: np.ndarray,
+    rho_background: float,
+    rho_sphere: float,
+    radius_m: float,
+    depth_center_m: float,
+):
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(9, 8), gridspec_kw={"height_ratios": [2, 1]}
+    )
 
-st.header(f'GDP in {to_year}', divider='gray')
+    # ---- Top: anomaly profile
+    ax1.plot(x_km, gz_mgal, lw=2)
+    ax1.axhline(0, lw=1, color="k")
+    ax1.set_xlabel("Distance x (km)")
+    ax1.set_ylabel("gz (mGal)")
+    ax1.set_title("Gravity anomaly of a buried sphere (analytic)")
+    ax1.grid(True)
 
-''
+    delta_rho = rho_sphere - rho_background
+    ax1.text(
+        0.02,
+        0.95,
+        f"ρ background = {rho_background:.0f} kg/m³\n"
+        f"ρ sphere = {rho_sphere:.0f} kg/m³\n"
+        f"Δρ = {delta_rho:.0f} kg/m³\n"
+        f"Radius R = {radius_m:.0f} m\n"
+        f"Depth to center = {depth_center_m:.0f} m\n"
+        f"Convention: positive downward (dense body → + anomaly)",
+        transform=ax1.transAxes,
+        va="top",
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.85),
+    )
 
-cols = st.columns(4)
+    # ---- Bottom: schematic cross-section
+    ax2.axhline(0, color="k", lw=1)
+    sphere = Circle(
+        (0.0, -depth_center_m / 1000.0),
+        radius_m / 1000.0,
+        facecolor="lightcoral",
+        edgecolor="k",
+        alpha=0.7,
+    )
+    ax2.add_patch(sphere)
 
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
+    # Depth arrow
+    ax2.annotate(
+        "",
+        xy=(0.0, -depth_center_m / 1000.0),
+        xytext=(0.0, 0.0),
+        arrowprops=dict(arrowstyle="<->"),
+    )
+    ax2.text(
+        0.2,
+        -depth_center_m / 2000.0,
+        f"Depth = {depth_center_m:.0f} m",
+        va="center",
+    )
 
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
+    # Radius arrow
+    ax2.annotate(
+        "",
+        xy=(radius_m / 1000.0, -depth_center_m / 1000.0),
+        xytext=(0.0, -depth_center_m / 1000.0),
+        arrowprops=dict(arrowstyle="<->"),
+    )
+    ax2.text(
+        (radius_m / 2000.0),
+        -depth_center_m / 1000.0 - 0.35,
+        f"R = {radius_m:.0f} m",
+        ha="center",
+    )
 
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
+    ax2.set_aspect("equal")
+    ax2.set_xlim(-max(abs(x_km.min()), abs(x_km.max())), max(abs(x_km.min()), abs(x_km.max())))
+    ax2.set_ylim(-(depth_center_m / 1000.0 + 2.0), 1.0)
+    ax2.set_xlabel("Distance x (km)")
+    ax2.set_ylabel("Depth (km)")
+    ax2.set_title("Schematic cross-section")
+    ax2.grid(True)
 
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
+    plt.tight_layout()
+    return fig
+
+
+def main():
+    st.set_page_config(page_title="Gravity sphere forward model", layout="centered")
+    st.title("Gravity forward modelling – buried sphere (analytic)")
+
+    st.markdown(
+        "Interactive teaching tool: change densities, radius and depth, and see the gravity anomaly."
+    )
+
+    with st.sidebar:
+        st.header("Model parameters")
+
+        rho_background = st.number_input(
+            "Background density ρ₀ (kg/m³)",
+            min_value=1500.0,
+            max_value=3500.0,
+            value=2700.0,
+            step=50.0,
         )
+
+        rho_sphere = st.number_input(
+            "Sphere density ρs (kg/m³)",
+            min_value=1500.0,
+            max_value=4000.0,
+            value=3200.0,
+            step=50.0,
+        )
+
+        radius_m = st.slider(
+            "Sphere radius R (m)",
+            min_value=50,
+            max_value=3000,
+            value=600,
+            step=50,
+        )
+
+        depth_center_m = st.slider(
+            "Depth to sphere center (m)",
+            min_value=100,
+            max_value=10000,
+            value=1500,
+            step=100,
+        )
+
+        x_max_km = st.slider(
+            "Half profile length (km)",
+            min_value=1.0,
+            max_value=50.0,
+            value=6.0,
+            step=0.5,
+        )
+
+        n_obs = st.slider(
+            "Number of observation points",
+            min_value=51,
+            max_value=2001,
+            value=241,
+            step=10,
+        )
+
+    if rho_sphere == rho_background:
+        st.warning("Δρ = 0 → anomaly should be ~0 everywhere.")
+
+    x_km, gz_mgal = compute_gz_mgal(
+        rho_background=rho_background,
+        rho_sphere=rho_sphere,
+        radius_m=float(radius_m),
+        depth_center_m=float(depth_center_m),
+        x_max_km=float(x_max_km),
+        n_obs=int(n_obs),
+    )
+
+    fig = make_figure(
+        x_km=x_km,
+        gz_mgal=gz_mgal,
+        rho_background=rho_background,
+        rho_sphere=rho_sphere,
+        radius_m=float(radius_m),
+        depth_center_m=float(depth_center_m),
+    )
+
+    st.pyplot(fig)
+
+    st.subheader("Quick values")
+    st.write(
+        {
+            "Δρ (kg/m³)": float(rho_sphere - rho_background),
+            "Peak |gz| (mGal)": float(np.max(np.abs(gz_mgal))),
+        }
+    )
+
+
+if __name__ == "__main__":
+    main()
